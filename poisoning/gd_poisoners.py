@@ -1,13 +1,10 @@
 from __future__ import division, print_function
 
 # functional
-import random
 import numpy as np
 import numpy.linalg as la
-import bisect # for getting indices of values in inits
 
 # logging etc.
-import argparse
 import os
 import datetime
 
@@ -18,22 +15,7 @@ import matplotlib.pyplot as plt
 
 # sklearn imports
 from sklearn import linear_model
-from sklearn import svm
-from sklearn import decomposition
 from sklearn.datasets import make_regression
-
-from math import sqrt, exp,ceil
-from time import sleep
-from sys import argv
-
-#log_2 for python 2 or python 3
-try:
-    from math import log2
-except:
-    from math import log
-    def log2(val):
-        return log(val,2)
-
 
 # makes multiprocessing work with classes
 try:
@@ -145,11 +127,12 @@ class GDPoisoner(object):
         newlogdir: directory to log into, to save the visualization
         """
 
+        assert len(poisx) == len(poisy)
         poisct = poisx.shape[0]
         print("Poison Count: {}".format(poisct))
 
-        new_poisx = np.zeros(poisx.shape)
-        new_poisy = [None for a in poisy]
+        new_poisx = np.zeros_like(poisx)
+        new_poisy = np.empty_like(poisy)
 
         if visualize:
             # initialize poisoning histories
@@ -158,11 +141,11 @@ class GDPoisoner(object):
             poisy_hist = np.zeros((10, poisx.shape[0]))
             
             # store first round
-            poisx_hist[0] = poisxinit[:]
-            poisy_hist[0] = np.array(poisy)
+            poisx_hist[0] = poisx
+            poisy_hist[0] = poisy
 
-        best_poisx = np.zeros( poisx.shape )
-        best_poisy = [None for a in poisy]
+        best_poisx = np.zeros_like(poisx)
+        best_poisy = np.empty_like(poisy)
 
         best_obj = 0
         last_obj = 0
@@ -176,28 +159,28 @@ class GDPoisoner(object):
     
         sig = self.compute_sigma() # can already compute sigma and mu
         mu = self.compute_mu()     # as x_c does not change them
-        eq7lhs = np.bmat([ [sig, np.transpose(mu)],
-                           [mu,  np.matrix([1])] ] )
+        eq7lhs = np.block([[sig,         mu[:, None]],
+                           [mu[None, :], 1          ]])
      
         # initial model - used in visualization
         clf_init, lam_init = self.learn_model(self.trnx, self.trny, None)
         clf, lam           = clf_init, lam_init
 
         # figure out starting error
-        it_res = self.iter_progress(poisx, poisy,poisx, poisy)
+        w1, w0, (vld_err, tst_err) = self.iter_progress(poisx, poisy, poisx, poisy)
     
         print("Iteration {}:".format(count))
-        print("Objective Value: {} Change: {}".format(it_res[0], it_res[0]))
-        print("Validation MSE: {}".format(it_res[2][0]))
-        print("Test MSE: {}".format(it_res[2][1]))
+        print("Objective Value: {} Change: {}".format(w1, w1))
+        print("Validation MSE: {}".format(vld_err))
+        print("Test MSE: {}".format(tst_err))
 
-        last_obj = it_res[0]
-        if it_res[0]>best_obj:
-            best_poisx, best_poisy, best_obj = poisx, poisy, it_res[0]
+        last_obj = w1
+        if w1 > best_obj:
+            best_poisx, best_poisy, best_obj = poisx, poisy, w1
         
         # stuff to put into self.resfile
-        towrite = [poisct, count, it_res[0], it_res[1], \
-                   it_res[2][0], it_res[2][1], \
+        towrite = [poisct, count, w1, w0, \
+                   vld_err, tst_err, \
                    (datetime.datetime.now() - tstart).total_seconds()] 
 
         self.resfile.write( ','.join( [str(val) for val in towrite] ) + "\n" )
@@ -207,22 +190,20 @@ class GDPoisoner(object):
         if visualize:
             self.trainfile.write('{},{}\n'.format(poisy[0], new_poisx[0]))
         else:
-            for j in range(poisct):
-                self.trainfile.write(','.join(
-                            [str(val) for val
-                              in [poisy[j]] + poisx[j].tolist()[0] \
-                            ])+'\n')
+            for x, y in zip(poisx, poisy, strict=True):
+                self.trainfile.write(str(y) + ',')
+                self.trainfile.write(','.join(map(str, x)) + '\n')
 
         # main work loop
         while True:
             count += 1
-            new_poisx = np.matrix(np.zeros(poisx.shape))
-            new_poisy = [None for a in poisy]
-            x_cur = np.concatenate( (self.trnx, poisx), axis = 0)
-            y_cur = self.trny + poisy
+            new_poisx = np.zeros_like(poisx)
+            new_poisy = np.empty_like(poisy)
+            x_cur = np.concatenate((self.trnx, poisx), axis=0)
+            y_cur = np.concatenate((self.trny, poisy))
 
-            clf, lam = self.learn_model(x_cur, y_cur, None)         
-            pois_params = [(poisx[i], poisy[i], eq7lhs, mu, clf, lam)\
+            clf, lam = self.learn_model(x_cur, y_cur, None)    
+            pois_params = [(poisx[i], poisy[i], eq7lhs, mu, clf, lam)
                             for i in range(poisct)]
             outofboundsct = 0
             
@@ -245,53 +226,51 @@ class GDPoisoner(object):
 
 
             if visualize:
-                poisx_hist[count] = new_poisx[:]
-                poisy_hist[count] = np.array(new_poisy).ravel()
+                poisx_hist[count] = new_poisx
+                poisy_hist[count] = new_poisy
 
-            it_res = self.iter_progress(poisx, poisy, new_poisx, new_poisy)
+            w1, w0, (val_err, tst_err) = self.iter_progress(poisx, poisy, new_poisx, new_poisy)
 
             print("Iteration {}:".format(count))
-            print("Objective Value: {} Change: {}".format(
-                                it_res[0], it_res[0] - it_res[1]))
+            print("Objective Value: {} Change: {}".format(w1, w1 - w0))
 
-            print("Validation MSE: {}".format(it_res[2][0]))
-            print("Test MSE: {}".format(it_res[2][1]))
-            print("Y pushed out of bounds: {}/{}".format(
-                                        outofboundsct, poisct))
+            print("Validation MSE: {}".format(vld_err))
+            print("Test MSE: {}".format(tst_err))
+            print("Y pushed out of bounds: {}/{}".format(outofboundsct, poisct))
             
             # if we don't make progress, decrease learning rate
-            if (it_res[0] < it_res[1]):
-                print("no progress")
+            if w1 < w0:
+                print("no progress, current lr: {}, w1: {}, w0: {}".format(self.eta, w1, w0))
                 self.eta *= 0.75
-                new_poisx, new_poisy = poisx, poisy
+                new_poisx = poisx
+                new_poisy = poisy
             else:
                 poisx = new_poisx
                 poisy = new_poisy
 
-            if (it_res[0] > best_obj):
-                best_poisx, best_poisy, best_obj = poisx, poisy, it_res[1]
+            if w1 > best_obj:
+                best_poisx, best_poisy, best_obj = poisx, poisy, w1
 
-            last_obj = it_res[1]
+            last_obj = w0
 
-            towrite = [poisct, count, it_res[0], it_res[1]-it_res[0],\
-                       it_res[2][0], it_res[2][1], \
+            towrite = [poisct, count, w1, w0 - w1,\
+                       val_err, tst_err, \
                        (datetime.datetime.now() - tstart).total_seconds()]
 
             self.resfile.write(','.join([str(val) for val in towrite])+"\n")
             self.trainfile.write("\n{},{}\n".format(poisct,count))
 
-            for j in range(poisct):
-                self.trainfile.write(','.join([str(val) for val in
-                                     [new_poisy[j]] + new_poisx[j].tolist()[0]
-                                     ])+'\n')
-            it_diff = abs(it_res[0] - it_res[1])
+            for x, y in zip(new_poisx, new_poisy, strict=True):
+                self.trainfile.write(str(y) + ',')
+                self.trainfile.write(','.join(map(str, new_poisx)) + '\n')
+            it_diff = abs(w1 - w0)
 
             # stopping conditions
-            if (count >= 15 and (it_diff <= self.eps or count > 50)):
+            if count >= 15 and (it_diff <= self.eps or count > 50):
                 break
 
             # visualization done - plotting time
-            if (visualize and count >= 9):
+            if visualize and count >= 9:
                 self.plot_path(clf_init, lam_init, eq7lhs, mu, \
                                poisx_hist, poisy_hist, newlogdir)
                 break
@@ -313,7 +292,7 @@ class GDPoisoner(object):
         newlogdir: directory to save pretty picture to        
         """
     
-        plt.plot(self.x, self.y, 'k.')
+        plt.plot(self.trnx, self.trny, 'k.')
         x_line = np.linspace(0,1,10)
         y_line = x_line * clf.coef_ + clf.intercept_
         plt.plot(x_line, y_line, 'k-')
@@ -518,12 +497,8 @@ class GDPoisoner(object):
 
     def lineSearch(self,poisxelem, poisyelem,attack,attacky):
         k = 0
-        x0 = np.copy(self.trnx)
-        y0 = self.trny[:]
-
-        curx = np.append(x0, poisxelem, axis=0)
-        cury = y0[:] # why not?
-        cury.append(poisyelem)
+        curx = np.append(self.trnx, poisxelem[None, :], axis=0)
+        cury = np.append(self.trny, poisyelem)
 
         clf, lam = self.learn_model(curx, cury, None)
         clf1, lam1 = clf, lam
@@ -565,19 +540,15 @@ class GDPoisoner(object):
             lastyc = curyc
             w_1 = w_2
             k += 1
-    
-        for col in self.colmap:
-            vals = [(curpoisxelem[0,j], j) for j in self.colmap[col]]
-            topval, topcol = max(vals)
-            for j in self.colmap[col]:
-                if (j != topcol):
-                    curpoisxelem[0,j] = 0
-            if ( topval > 1/(1 + len(self.colmap[col])) ):
-                curpoisxelem[0,topcol]=1
-            else:
-                curpoisxelem[0,topcol]=0
-        curx = np.delete(curx, curx.shape[0] - 1, axis = 0)
-        curx = np.append(curx, curpoisxelem, axis = 0)
+
+        # Seems that only last `col` is working?
+        for col in self.colmap.values():
+            topcol = np.argmax(curpoisxelem[col])
+            topval = curpoisxelem[topcol]
+            curpoisxelem[:] = 0
+            if topval > 1/(1 + len(col)):
+                curpoisxelem[topcol] = 1
+        curx[-1] = curpoisxelem
         cury[-1] = curyc
         clf1, lam1 = self.learn_model(curx, cury, None)
 
@@ -587,13 +558,13 @@ class GDPoisoner(object):
 
 
     def iter_progress(self, lastpoisx, lastpoisy, curpoisx, curpoisy):
-        x0 = np.concatenate((self.trnx, lastpoisx), axis = 0)
-        y0 = self.trny + lastpoisy
+        x0 = np.concatenate((self.trnx, lastpoisx), axis=0)
+        y0 = np.concatenate((self.trny, lastpoisy))
         clf0, lam0 = self.learn_model(x0, y0, None)
         w_0 = self.obj_comp(clf0, lam0, None)
 
-        x1 = np.concatenate((self.trnx, curpoisx), axis = 0)
-        y1 = self.trny + curpoisy
+        x1 = np.concatenate((self.trnx, curpoisx), axis=0)
+        y1 = np.concatenate((self.trny, curpoisy))
         clf1, lam1 = self.learn_model(x1, y1, None)
         w_1 = self.obj_comp(clf1, lam1, None)
         err = self.computeError(clf1)
@@ -671,7 +642,7 @@ class LinRegGDPoisoner(GDPoisoner):
                             eta, beta, sigma, eps, mproc, \
                             trainfile, resfile, \
                             objective, opty, colmap)
-        self.initclf, self.initlam = self.learn_model(self.x,self.y,None)
+        self.initclf, self.initlam = self.learn_model(self.trnx,self.trny,None)
 
     def learn_model(self, x, y, clf):
         if (not clf):
@@ -699,8 +670,8 @@ class LinRegGDPoisoner(GDPoisoner):
 
     def compute_wb_zc(self,eq7lhs, mu, w, m, n,poisxelem):
 
-        eq7rhs = -(1/n)*np.bmat([[m,             -np.matrix(poisxelem.T)],
-                                 [np.matrix(w.T), np.matrix([-1])       ]])
+        eq7rhs = -(1/n) * np.block([[m,          -poisxelem[:, None]],
+                                    [w[None, :], -1                 ]])
     
         wbxc = np.linalg.lstsq(eq7lhs,eq7rhs,rcond=None)[0]
         wxc = wbxc[:-1,:-1] # get all but last row
@@ -876,7 +847,7 @@ class ENetGDPoisoner(LinRegGDPoisoner):
                             trainfile, resfile, \
                             objective, opty)
         self.initlam = -1
-        self.initclf,self.initlam = self.learn_model(self.x,self.y,None,None)
+        self.initclf,self.initlam = self.learn_model(self.trnx,self.trny,None,None)
 
     def comp_obj_trn(self, clf, lam, otherargs):
         curweight = LinRegGDPoisoner.comp_W_0(self,clf,lam,otherargs)

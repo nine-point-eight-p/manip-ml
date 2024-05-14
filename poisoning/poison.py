@@ -1,6 +1,8 @@
 # Matthew Jagielski
 
-import numpy as np, scipy.optimize
+import math
+import sys
+import numpy as np
 import numpy.linalg as la
 
 
@@ -56,11 +58,13 @@ def open_dataset(f,visualize):
     y = (y-y.min())/(y.max()-y.min())
 
     plt.plot(x, y, 'k.')
-    colmap = []
+    
+    global colmap
+    colmap = {}
   else:
     x,y = read_dataset_file(f)
 
-  return np.matrix(x), y
+  return x, y
 
 def read_dataset_file(f):
   with open(f) as dataset:
@@ -82,7 +86,7 @@ def read_dataset_file(f):
       y.append(line[0])
       x.append(line[1:])
 
-    return np.matrix(x), y
+    return np.array(x), np.array(y)
 
 # ------------------------------------------------------------------------------- 
 def open_logging_files(logdir,modeltype,logind,args):
@@ -91,7 +95,7 @@ def open_logging_files(logdir,modeltype,logind,args):
   if not os.path.exists(logdir):
     os.makedirs(logdir)
   with open(os.path.join(logdir,'cmd'),'w') as cmdfile:
-    cmdfile.write(' '.join(['python3'] + argv))
+    cmdfile.write(' '.join(['python3'] + sys.argv))
     cmdfile.write('\n')
     for arg in args.__dict__:
       cmdfile.write('{}: {}\n'.format(arg,args.__dict__[arg]))
@@ -115,19 +119,19 @@ def sample_dataset(x, y, trnct, poisct, tstct, vldct, seed):
     sampletrn = fullperm[:trnct]
     sampletst = fullperm[trnct:trnct + tstct]
     samplevld = fullperm[trnct + tstct:trnct + tstct + vldct]
-    samplepois = np.random.choice(size, poisct)
+    samplepois = np.random.choice(size, poisct, replace=True)
 
-    trnx = np.matrix([np.array(x[row]).reshape((x.shape[1],)) for row in sampletrn])
-    trny = [y[row] for row in sampletrn]
+    trnx = x[sampletrn]
+    trny = y[sampletrn]
     
-    tstx = np.matrix([np.array(x[row]).reshape((x.shape[1],)) for row in sampletst])
-    tsty = [y[row] for row in sampletst]
+    tstx = x[sampletst]
+    tsty = y[sampletst]
     
-    poisx = np.matrix([np.array(x[row]).reshape((x.shape[1],)) for row in samplepois])
-    poisy = [y[row] for row in samplepois]
+    poisx = x[samplevld]
+    poisy = y[samplevld]
 
-    vldx = np.matrix([np.array(x[row]).reshape((x.shape[1],)) for row in samplevld])
-    vldy = [y[row] for row in samplevld]
+    vldx = x[samplepois]
+    vldy = y[samplepois]
     
     return trnx, trny, tstx, tsty, poisx, poisy, vldx, vldy
 
@@ -275,25 +279,17 @@ def alfatilt(x,y,count,poiser):
 
 # ------------------------------------------------------------------------------- 
 def inf_flip(X_tr, Y_tr,count):
-  Y_tr = np.array(Y_tr)
-  inv_cov = (0.01 * np.eye(X_tr.shape[1]) + np.dot(X_tr.T, X_tr)) ** -1
+  inv_cov = (np.full((X_tr.shape[1], X_tr.shape[1]), 1e-8) + np.dot(X_tr.T, X_tr)) ** -1
   H = np.dot(np.dot(X_tr, inv_cov), X_tr.T)
   bests = np.sum(H,axis = 1)
   room = .5 + np.abs(Y_tr-0.5)
   yvals = 1-np.floor(0.5+Y_tr)
   stat = np.multiply(bests.ravel(),room.ravel())
-  stat = stat.tolist()[0]
-  totalprob = sum(stat)
-  allprobs = [0]
-  poisinds = []
-  for i in range(X_tr.shape[0]):
-    allprobs.append(allprobs[-1]+stat[i])
-  allprobs = allprobs[1:]
-  for i in range(count):
-    a = np.random.uniform(low=0,high=totalprob)
-    poisinds.append(bisect.bisect_left(allprobs,a))
-  
-  return X_tr[poisinds], [yvals[a] for a in poisinds]
+  totalprob = np.sum(stat)
+  allprobs = np.cumsum(stat)
+  poisvals = np.random.uniform(0, totalprob, count)
+  poisinds = np.searchsorted(allprobs, poisvals, side="left")  
+  return X_tr[poisinds], yvals[poisinds]
 
 # ------------------------------------------------------------------------------- 
 def alfa_tilt(X_tr, Y_tr,count):
@@ -398,7 +394,7 @@ def rmml(X_tr,Y_tr, count):
 
 # ------------------------------------------------------------------------------- 
 def roundpois(poisx,poisy):
-  return np.around(poisx),[0 if val<0.5 else 1 for val in poisy]
+  return np.around(poisx), np.where(poisy < 0.5, 0, 1)
 
 
 # ------------------------------------------------------------------------------- 
@@ -412,21 +408,24 @@ def main(args):
         sample_dataset(x, y, args.trainct, args.poisct, args.testct, args.validct,\
                        args.seed)
     
-    for i in range(len(testy)):
-        testfile.write(','.join([str(val) for val in [testy[i]]+testx[i].tolist()[0]]) + '\n')
+    for x, y in zip(testx, testy, strict=True):
+        testfile.write(str(y) + ',')
+        testfile.write(','.join(map(str, x)) + '\n')
     testfile.close()
     
-    for i in range(len(validy)):
-        validfile.write(','.join([str(val) for val in [validy[i]]+validx[i].tolist()[0]]) + '\n')
+    for x, y in zip(validx, validy, strict=True):
+        validfile.write(str(y) + ',')
+        validfile.write(','.join(map(str, x)) + '\n')
     validfile.close()
 
-    for i in range(len(trainy)):
-        trainfile.write(','.join([str(val) for val in [trainy[i]]+trainx[i].tolist()[0]]) + '\n')
-        
+    for x, y in zip(trainx, trainy, strict=True):
+        trainfile.write(str(y) + ',')
+        trainfile.write(','.join(map(str, x)) + '\n')
+
     print(la.matrix_rank(trainx))
     print(trainx.shape)
 
-    totprop = args.poisct/(args.poisct + args.trainct)
+    totprop = args.poisct/(args.poisct + args.trainct) # p / (n + p)
     print(totprop)
 
     timestart,timeend = None,None
@@ -451,17 +450,22 @@ def main(args):
 
     genpoiser = types[args.model](trainx, trainy, testx, testy, validx, validy,
                                   args.eta, args.beta, args.sigma, args.epsilon,
-                                  args.multiproc,
-                                  trainfile,resfile,args.objective,args.optimizey, colmap)
+                                  args.multiproc, trainfile, resfile,
+                                  args.objective,args.optimizey, colmap)
 
     for initit in range(args.numinit):
-        poisx,poisy = init(trainx,trainy,int(args.trainct*totprop/(1-totprop)+0.5))
-        clf, _ = genpoiser.learn_model(np.concatenate((trainx,poisx),axis=0),trainy+poisy,None)
+        numsamples = math.ceil(args.trainct * totprop / (1 - totprop))
+        poisx, poisy = init(trainx, trainy, numsamples)
+        clf, _ = genpoiser.learn_model(
+          np.concatenate((trainx, poisx), axis=0),
+          np.concatenate((trainy, poisy), axis=0),
+          None
+        )
         err = genpoiser.computeError(clf)[0]
         print("Validation Error:", err)
         if err > besterr:
-            bestpoisx, bestpoisy, besterr = np.copy(poisx), poisy[:], err
-    poisx, poisy = np.matrix(bestpoisx), bestpoisy
+            bestpoisx, bestpoisy, besterr = np.copy(poisx), np.copy(poisy), err
+    poisx, poisy = bestpoisx, bestpoisy
     poiser = types[args.model](trainx, trainy, testx, testy, validx, validy,\
                                args.eta, args.beta, args.sigma, args.epsilon,\
                                args.multiproc, trainfile, resfile,\
@@ -469,23 +473,25 @@ def main(args):
 
     
     for i in range(args.partct + 1):
-        curprop = (i + 1)*totprop/(args.partct + 1)
-        numsamples = int(0.5 + args.trainct*(curprop/(1 - curprop)))
+        # let p' / (n + p') = kp / (n + p) = curprop, k = 1/n, 2/n, ..., n/n
+        curprop = (i + 1) * totprop / (args.partct + 1)
+        # p' = nkp / (n + p - kp) = n * curprop * (1 - curprop)
+        numsamples = math.ceil(args.trainct * curprop / (1 - curprop))
         curpoisx = poisx[:numsamples,:]
         curpoisy = poisy[:numsamples]
         trainfile.write("\n")
 
         timestart = datetime.datetime.now()
         poisres, poisresy = poiser.poison_data(curpoisx, curpoisy, timestart, args.visualize, newlogdir)
-        print(poisres.shape,trainx.shape)
-        poisedx = np.concatenate((trainx,poisres),axis = 0)
-        poisedy = trainy + poisresy
+        poisedx = np.concatenate((trainx, poisres), axis=0)
+        poisedy = np.concatenate((trainy, poisresy))
 
         clfp, _ = poiser.learn_model(poisedx,poisedy,None)
         clf = poiser.initclf
         if args.rounding:
             roundx,roundy = roundpois(poisres,poisresy)
-            rpoisedx,rpoisedy = np.concatenate((trainx,roundx),axis = 0),trainy + roundy
+            rpoisedx = np.concatenate((trainx, roundx), axis=0)
+            rpoisedy = np.concatenate((trainy, roundy))
             clfr, _ = poiser.learn_model(rpoisedx,rpoisedy,None)
             rounderr = poiser.computeError(clfr)
 
@@ -497,15 +503,17 @@ def main(args):
         towrite = [numsamples,-1,None,None,err[0],err[1],(timeend-timestart).total_seconds()]
         resfile.write(','.join([str(val) for val in towrite])+"\n")
         trainfile.write("\n")
-        for j in range(numsamples):
-            trainfile.write(','.join([str(val) for val in [poisresy[j]]+poisres[j].tolist()[0]])+'\n')
+        for x, y in zip(poisres, poisresy, strict=True):
+            trainfile.write(str(y) + '\n')
+            trainfile.write(','.join(map(str, x)) + '\n')
 
         if args.rounding:
             towrite = [numsamples,'r',None,None,rounderr[0],rounderr[1],(timeend-timestart).total_seconds()]
             resfile.write(','.join([str(val) for val in towrite])+"\n")
             trainfile.write("\nround\n")
-            for j in range(numsamples):
-                trainfile.write(','.join([str(val) for val in [roundy[j]]+roundx[j].tolist()[0]])+'\n')
+            for x, y in zip(roundx, roundy, strict=True):
+                trainfile.write(str(y) + '\n')
+                trainfile.write(','.join(map(str, x)) + '\n')
 
         resfile.flush()
         trainfile.flush()
