@@ -7,6 +7,7 @@ import numpy.linalg as la
 # logging etc.
 import os
 import datetime
+from tqdm import tqdm
 
 # visualization
 import matplotlib
@@ -18,6 +19,7 @@ from sklearn import linear_model
 from sklearn.datasets import make_regression
 
 # makes multiprocessing work with classes
+import multiprocessing as mp
 try:
   def _pickle_method(method):
     func_name = method.im_func.__name__
@@ -35,9 +37,9 @@ try:
         break
     return func.__get__(obj, cls)
 
-  import copy_reg
+  import copyreg
   import types
-  copy_reg.pickle(types.MethodType, _pickle_method, _unpickle_method)
+  copyreg.pickle(types.MethodType, _pickle_method, _unpickle_method)
 except:
   pass
 
@@ -88,15 +90,15 @@ class GDPoisoner(object):
         self.objective = objective
         self.opty = opty
 
-        if (objective == 0): # training MSE + regularization
+        if objective == 0: # training MSE + regularization
             self.attack_comp = self.comp_attack_trn
             self.obj_comp = self.comp_obj_trn
 
-        elif (objective == 1): # validation MSE
+        elif objective == 1: # validation MSE
             self.attack_comp = self.comp_attack_vld
             self.obj_comp = self.comp_obj_vld
 
-        elif (objective == 2): # l2 distance between clean and poisoned
+        elif objective == 2: # l2 distance between clean and poisoned
             self.attack_comp = self.comp_attack_l2
             self.obj_comp = self.comp_obj_new
 
@@ -150,12 +152,6 @@ class GDPoisoner(object):
         best_obj = 0
         last_obj = 0
         count = 0
-
-        if self.mp:
-            import multiprocessing as mp
-            workerpool = mp.Pool(max(1, mp.cpu_count()//2 - 1))
-        else:
-            workerpool = None
     
         sig = self.compute_sigma() # can already compute sigma and mu
         mu = self.compute_mu()     # as x_c does not change them
@@ -203,22 +199,21 @@ class GDPoisoner(object):
             y_cur = np.concatenate((self.trny, poisy))
 
             clf, lam = self.learn_model(x_cur, y_cur, None)    
-            pois_params = [(poisx[i], poisy[i], eq7lhs, mu, clf, lam)
+            pois_params = [(np.copy(poisx[i]), poisy[i], eq7lhs, mu, clf, lam)
                             for i in range(poisct)]
             outofboundsct = 0
             
-            if workerpool: # multiprocessing
-                for i, cur_pois_res in enumerate(
-                                workerpool.map(self.poison_data_subroutine,
-                                               pois_params)):
-
-                    new_poisx[i]   = cur_pois_res[0]
-                    new_poisy[i]   = cur_pois_res[1]
-                    outofboundsct += cur_pois_res[2]
+            if self.mp:
+                with mp.Pool(max(1, mp.cpu_count()//2 - 1)) as pool:
+                    results = pool.starmap(self.poison_data_subroutine, pois_params)
+                    for i, cur_pois_res in enumerate(results):
+                        new_poisx[i]   = cur_pois_res[0]
+                        new_poisy[i]   = cur_pois_res[1]
+                        outofboundsct += cur_pois_res[2]
 
             else:
-                for i in range(poisct):
-                    cur_pois_res = self.poison_data_subroutine(pois_params[i])
+                for i in tqdm(range(poisct)):
+                    cur_pois_res = self.poison_data_subroutine(*pois_params[i])
 
                     new_poisx[i]   = cur_pois_res[0]
                     new_poisy[i]   = cur_pois_res[1]
@@ -274,9 +269,6 @@ class GDPoisoner(object):
                 self.plot_path(clf_init, lam_init, eq7lhs, mu, \
                                poisx_hist, poisy_hist, newlogdir)
                 break
-
-        if workerpool:
-            workerpool.close()
 
         return best_poisx, best_poisy
 
@@ -387,7 +379,7 @@ class GDPoisoner(object):
         wxc, bxc, wyc, byc = self.compute_wb_zc(eq7lhs, mu, clf.coef_, m, \
                                                 self.samplenum, poisx)
 
-        if (self.objective == 0):
+        if self.objective == 0:
             r = self.compute_r(clf, lam)
             otherargs = (r,)
         else:
@@ -403,7 +395,7 @@ class GDPoisoner(object):
 
         return attack,attacky
 
-    def poison_data_subroutine(self,in_tuple):
+    def poison_data_subroutine(self, poisxelem, poisyelem, eq7lhs, mu, clf, lam):
         """
         poison_data_subroutine poisons a single poisoning point
         input is passed in as a tuple and immediately unpacked for
@@ -413,15 +405,13 @@ class GDPoisoner(object):
         eq7lhs, mu: values for computation
         clf, lam: current model and regularization coef
         """
-
-        poisxelem, poisyelem, eq7lhs, mu, clf, lam = in_tuple
         m = self.compute_m(clf, poisxelem, poisyelem)
 
         # compute partials
         wxc, bxc, wyc, byc = self.compute_wb_zc(eq7lhs, mu, clf.coef_, m,\
                                                 self.samplenum, poisxelem)
 
-        if (self.objective == 0):
+        if self.objective == 0:
             r = self.compute_r(clf, lam)
             otherargs = (r,)
         else:
@@ -438,7 +428,7 @@ class GDPoisoner(object):
 
         #include y in gradient normalization
         if self.opty:
-            allattack = np.array(np.concatenate((attack, attacky), axis=1))
+            allattack = np.concatenate((attack, attacky), axis=1)
             allattack = allattack.ravel()
         else:
             allattack = attack.ravel()
@@ -458,37 +448,22 @@ class GDPoisoner(object):
 
 
     def computeError(self, clf):
-        toterr, v_toterr = 0, 0
-        rsqnum, v_rsqnum = 0, 0
-        rsqdenom, v_rsqdenom = 0, 0
-
         w = np.reshape(clf.coef_, (self.feanum,))
-        sum_w = np.linalg.norm(w,1)
+        # sum_w = np.linalg.norm(w,1)
 
-        mean = sum(self.tsty)/len(self.tsty)
-        vmean = sum(self.vldy)/len(self.vldy)
+        # tst_mean = np.mean(self.tsty)
+        # vld_mean = np.mean(self.vldy)
 
-        pred  = clf.predict(self.tstx) 
-        vpred = clf.predict(self.vldx)
+        tst_pred  = clf.predict(self.tstx) 
+        vld_pred = clf.predict(self.vldx)
 
-        for i, trueval in enumerate(self.vldy):
-            guess = vpred[i]
-            err = guess - trueval
+        tst_mse = np.mean((tst_pred - self.tsty) ** 2)
+        # tst_rsqnum = np.sum((tst_pred - tst_mean) ** 2)
+        # tst_rsqdenom = np.sum((self.tsty - tst_mean) ** 2)
 
-            v_toterr   += err**2 # MSE
-            v_rsqnum   += (guess-vmean)**2 # R^2 num and denom
-            v_rsqdenom += (trueval-vmean)**2
-    
-        for i,trueval in enumerate(self.tsty):
-            guess = pred[i]
-            err = guess-trueval
-
-            toterr   += err**2 # MSE
-            rsqnum   += (guess-mean)**2 # R^2 num and denom
-            rsqdenom += (trueval-mean)**2
-
-        vld_mse = v_toterr/len(self.vldy)
-        tst_mse = toterr/len(self.tsty)
+        vld_mse = np.mean((vld_pred - self.vldy) ** 2)
+        # vld_rsqnum = np.sum((vld_pred - vld_mean) ** 2)
+        # vld_rsqdenom = np.sum((self.vldy - vld_mean) ** 2)
 
         return vld_mse, tst_mse
         # computed a bunch of other stuff too
@@ -515,7 +490,7 @@ class GDPoisoner(object):
         eta = self.eta
 
         while True:
-            if (count > 0):
+            if count > 0:
                 eta = self.beta*eta
             count += 1
             curpoisxelem = curpoisxelem + eta*attack
@@ -530,8 +505,10 @@ class GDPoisoner(object):
             w_2 = self.obj_comp(clf1, lam1, otherargs)      
 
             if (count >=100 or abs(w_1-w_2)<1e-8): # convergence
+                # print("line-search: converged at step {}".format(count))
                 break 
             if (w_2 - w_1 < 0): # bad progress
+                # print("line-search: no progress at step {}".format(count))
                 curpoisxelem = lastpoisxelem
                 curyc = lastyc
                 break
@@ -541,11 +518,10 @@ class GDPoisoner(object):
             w_1 = w_2
             k += 1
 
-        # Seems that only last `col` is working?
         for col in self.colmap.values():
-            topcol = np.argmax(curpoisxelem[col])
+            topcol = col[np.argmax(curpoisxelem[col])]
             topval = curpoisxelem[topcol]
-            curpoisxelem[:] = 0
+            curpoisxelem[col] = 0
             if topval > 1/(1 + len(col)):
                 curpoisxelem[topcol] = 1
         curx[-1] = curpoisxelem
@@ -651,7 +627,7 @@ class LinRegGDPoisoner(GDPoisoner):
         return clf, 0
 
     def compute_sigma(self):
-        sigma = np.dot(np.transpose(self.trnx), self.trnx)
+        sigma = np.matmul(self.trnx.T, self.trnx)
         sigma = sigma / self.trnx.shape[0]
         return sigma
 
@@ -663,23 +639,25 @@ class LinRegGDPoisoner(GDPoisoner):
         w,b = clf.coef_, clf.intercept_
         poisxelemtransp = np.reshape(poisxelem, (self.feanum,1) )
         wtransp = np.reshape(w, (1,self.feanum) )
-        errterm = (np.dot(w, poisxelemtransp) + b - poisyelem).reshape((1,1))
+        errterm = np.dot(w, poisxelemtransp) + b - poisyelem
         first = np.dot(poisxelemtransp,wtransp)
-        m = first + errterm[0,0]*np.identity(self.feanum)
+        m = first + errterm * np.identity(self.feanum)
         return m
 
     def compute_wb_zc(self,eq7lhs, mu, w, m, n,poisxelem):
-
-        eq7rhs = -(1/n) * np.block([[m,          -poisxelem[:, None]],
+        # From eq14
+        eq7rhs = -(2/n) * np.block([[m,          -poisxelem[:, None]],
                                     [w[None, :], -1                 ]])
-    
+
+        # Use least squares instead of inverse
+        # W^T = AB^(-1) => W^T B = A => B^T W = A^T => BW = A^T (B is symmetric)
+        # where `eq7rhs` is A^T and `eq7lhs` is B
         wbxc = np.linalg.lstsq(eq7lhs,eq7rhs,rcond=None)[0]
         wxc = wbxc[:-1,:-1] # get all but last row
         bxc = wbxc[ -1,:-1] # get last row
         wyc = wbxc[:-1, -1]
         byc = wbxc[ -1, -1]
-
-        return wxc,bxc.ravel(),wyc.ravel(),byc
+        return wxc, bxc.ravel(), wyc.ravel(), byc
 
     def compute_r(self,clf,lam):
         r = np.zeros((1,self.feanum))
@@ -698,27 +676,27 @@ class LinRegGDPoisoner(GDPoisoner):
         return mse
    
     def comp_attack_trn(self,clf,wxc,bxc,wyc,byc,otherargs):
-        res = (clf.predict(self.trnx) - self.trny)
-        
-        gradx = np.dot(self.trnx, wxc)   + bxc
-        grady = np.dot(self.trnx, wyc.T) + byc 
+        res = clf.predict(self.trnx) - self.trny
 
-        attackx = np.dot(res,gradx) / self.samplenum
-        attacky = np.dot(res,grady) / self.samplenum
+        gradw = 2 * np.dot(res, self.trnx) / self.samplenum
+        gradb = 2 * np.sum(res) / self.samplenum
 
-        return attackx, attacky
+        gradx = gradw @ wxc + gradb * bxc
+        grady = gradw @ wyc + gradb * byc
+
+        return gradx, grady
 
     def comp_attack_vld(self,clf,wxc,bxc,wyc,byc,otherargs):
         n = self.vldx.shape[0]
-        res = (clf.predict(self.vldx)-self.vldy)
+        res = clf.predict(self.vldx) - self.vldy
 
-        gradx = np.dot(self.vldx, wxc)   + bxc
-        grady = np.dot(self.vldx, wyc.T) + byc
+        gradw = 2 * np.dot(res, self.vldx) / n
+        gradb = 2 * np.sum(res) / n
 
-        attackx = np.dot(res,gradx) / n
-        attacky = np.dot(res,grady) / n
+        gradx = gradw @ wxc + gradb * bxc
+        grady = gradw @ wyc + gradb * byc
 
-        return attackx, attacky
+        return gradx, grady
 
 
 ############################################################################################

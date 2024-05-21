@@ -77,10 +77,11 @@ def read_dataset_file(f):
     colmap = {}
     for i, col in enumerate(cols):
       if ':' in col:
-        if col.split(':')[0] in colmap:
-          colmap[col.split(':')[0]].append(i-1)
+        label = col.split(':')[0]
+        if label in colmap:
+          colmap[label].append(i-1) # why i-1?
         else:
-          colmap[col.split(':')[0]] = [i-1]
+          colmap[label] = [i-1]
     for line in dataset:
       line = [float(val) for val in line.split(',')]
       y.append(line[0])
@@ -473,9 +474,9 @@ def main(args):
 
     
     for i in range(args.partct + 1):
-        # let p' / (n + p') = kp / (n + p) = curprop, k = 1/n, 2/n, ..., n/n
+        # curprop = k * totprop, k = 1/n, 2/n, ..., n/n
         curprop = (i + 1) * totprop / (args.partct + 1)
-        # p' = nkp / (n + p - kp) = n * curprop * (1 - curprop)
+        # if prop is c, then c = p / (n + p) => p = nc / (1 - c)
         numsamples = math.ceil(args.trainct * curprop / (1 - curprop))
         curpoisx = poisx[:numsamples,:]
         curpoisy = poisy[:numsamples]
