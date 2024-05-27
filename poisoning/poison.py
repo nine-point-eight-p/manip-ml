@@ -7,9 +7,9 @@ import numpy.linalg as la
 from functools import partial
 
 # import my modules
-from my_args import setup_argparse 
+from parse import setup_argparse 
 from flip import inf_flip, alfa_tilt, adaptive, rand_flip, rand_flip_nobd, rmml
-from gd_poisoners import *
+from poisoners import *
 
 
 def open_dataset(f,visualize):
