@@ -2,7 +2,7 @@ import numpy as np
 import bisect
 
 """
-Code that seems never executed or not comparible to current version of the project.
+Code that seems never executed or not compatible to current version of the project.
 """
 
 
